@@ -83,6 +83,7 @@ class MainWindow(QMainWindow):
         self.toasts = []
         self.choice_toasts = []
         self.loot_toasts = []
+        self._pending_nudge = None
         self._last_emotion = "neutral"
         self.setWindowTitle("Кай")
         self.setGeometry(150, 100, 950, 750)
@@ -150,6 +151,7 @@ class MainWindow(QMainWindow):
         self._update_xp_ui()
         self._update_mood_ui()
         QTimer.singleShot(500, self.companion.greet)
+        QTimer.singleShot(3500, self._nudge_rehearsal)
         self.projects_page.refresh()
         # таймер ритуала/сезонов: проверка раз в минуту
         self._ritual_timer = QTimer(self)
@@ -239,6 +241,62 @@ class MainWindow(QMainWindow):
         if self._ludo_on():
             self._hook_reward("obedience")
 
+    # --- Побуждение к репетиции при входе ---
+    def _pick_rehearsal_candidate(self):
+        """Незавершённая задача с шагами (свежая первой)."""
+        best = None
+        for p in self.data.get_projects():
+            for t in p["tasks"]:
+                if t["done"] or not t["steps"]:
+                    continue
+                if best is None or t.get("created_at", "") > best[0]:
+                    best = (t.get("created_at", ""), p["id"], t)
+        if best is None:
+            return None
+        _, pid, t = best
+        return pid, t
+
+    def _nudge_rehearsal(self):
+        """При входе: предложить пройти репетицию первой незавершённой задачи."""
+        import datetime
+        today = datetime.date.today().isoformat()
+        if self.gamification.data.get("nudge_date") == today:
+            return  # раз в день
+        if self.mood.boycotting():
+            return  # бойкот: Кай молчит
+        cand = self._pick_rehearsal_candidate()
+        if not cand:
+            return
+        pid, task = cand
+        self.gamification.data["nudge_date"] = today
+        self.gamification._save()
+        self._pending_nudge = (pid, task["id"])
+        text = self.bank.say("rehearsal_nudge", name=task["name"])
+        self.companion.say_aloud("caring", text)
+        self.monitor.offer_choice("rehearsal_nudge", text,
+                                  [("start", "🎭 Пройти сейчас"),
+                                   ("later", "🕒 Позже"),
+                                   ("ignore", "🙈 Игнорирую")])
+
+    def _resolve_nudge_choice(self, option):
+        cand = getattr(self, "_pending_nudge", None)
+        self._pending_nudge = None
+        if option == "start" and cand:
+            pid, tid = cand
+            task = self.data.get_task(pid, tid)
+            if task:
+                self._start_rehearsal(task["steps"], task["name"], "voice")
+        elif option == "later":
+            self.companion.say("neutral", self.bank.say("nudge_later"))
+        elif option == "ignore":
+            res = self.mood.on_ignored()
+            self.rituals.count_ignored()
+            self._update_mood_ui()
+            if res["strikes"] == 1:
+                self.companion.say("worried", self.bank.say("cold_pack"))
+            elif res["boycott_started"]:
+                self.companion.say("cold", self.bank.say("boycott_start"))
+
     # --- Часть B: выборы, долги, ритуал, сезоны ---
     def _on_choice_offered(self, choice_id, text, choices):
         toast = ChoiceToast("Кай", text, choices, choice_id=choice_id)
@@ -252,6 +310,9 @@ class MainWindow(QMainWindow):
     def _on_choice_answered(self, toast, option):
         if toast in self.choice_toasts:
             self.choice_toasts.remove(toast)
+        if getattr(toast, "choice_id", "") == "rehearsal_nudge":
+            self._resolve_nudge_choice(option)
+            return
         if option == "ignore":
             res = self.mood.on_ignored()
             self.rituals.count_ignored()
