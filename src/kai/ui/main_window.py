@@ -7,8 +7,12 @@ ui.theme.STYLESHEET; ui.nav.NavBar; ui.status_bar.StatusBar; ui.widgets.Toast;
 ui.choice_toast.ChoiceToast; ui.pages.*; kai.constants.ACHIEVEMENTS;
 kai.sys_utils.push_notify; kai.core.relationship.Mood; kai.core.contracts.DebtBook;
 kai.core.rituals.EveningRitual; kai.voice.seasons.SeasonWheel.
+Часть C: kai.core.economy.Wallet; kai.core.loot.ChestEngine; kai.core.wheel.WheelFortune;
+kai.core.collections.MoodCollection; kai.core.wagers.WagerBook; ui.pages.loot_page.LootPage;
+ui.loot_toast.LootToast.
 """
 import sys
+from datetime import datetime, date
 
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QStackedWidget, QLabel, QSystemTrayIcon, QMenu)
@@ -26,6 +30,11 @@ from kai.core.companion import Companion
 from kai.core.relationship import Mood
 from kai.core.contracts import DebtBook
 from kai.core.rituals import EveningRitual
+from kai.core.economy import Wallet
+from kai.core.loot import ChestEngine
+from kai.core.wheel import WheelFortune
+from kai.core.collections import MoodCollection
+from kai.core.wagers import WagerBook
 from kai.voice.engine import VoiceEngine
 from kai.voice.seasons import SeasonWheel
 from kai.ui.theme import STYLESHEET
@@ -33,6 +42,8 @@ from kai.ui.nav import NavBar
 from kai.ui.status_bar import StatusBar
 from kai.ui.widgets import Toast
 from kai.ui.choice_toast import ChoiceToast
+from kai.ui.loot_toast import LootToast
+from kai.ui.pages.loot_page import LootPage
 from kai.ui.pages.projects import ProjectsPage
 from kai.ui.pages.project import ProjectPage
 from kai.ui.pages.task import TaskPage
@@ -63,8 +74,15 @@ class MainWindow(QMainWindow):
         self.companion = Companion(self.voice_engine, self.bank,
                                    mood=self.mood, debts=self.debts)
         self.mood.daily_decay()
+        # --- Часть C: азарт-слой ---
+        self.wallet = Wallet(self.gamification.save_file)
+        self.chests = ChestEngine(self.gamification.save_file)
+        self.wheel = WheelFortune(self.gamification.save_file)
+        self.collection = MoodCollection(self.gamification.save_file)
+        self.wagers = WagerBook(self.gamification.save_file, self.gamification)
         self.toasts = []
         self.choice_toasts = []
+        self.loot_toasts = []
         self._last_emotion = "neutral"
         self.setWindowTitle("Кай")
         self.setGeometry(150, 100, 950, 750)
@@ -90,13 +108,17 @@ class MainWindow(QMainWindow):
         self.settings_page = SettingsPage(self.monitor, self.voice_engine,
                                           self.avatar, self.companion, self.bank,
                                           mood=self.mood, rituals=self.rituals,
-                                          seasons=self.seasons)
+                                          seasons=self.seasons, chests=self.chests,
+                                          wheel=self.wheel, wagers=self.wagers)
         self.stack.addWidget(self.projects_page)   # 0
         self.stack.addWidget(self.project_page)    # 1
         self.stack.addWidget(self.task_page)       # 2
         self.stack.addWidget(self.rehearsal_page)  # 3
         self.stack.addWidget(self.game_page)       # 4
         self.stack.addWidget(self.settings_page)   # 5
+        # --- Часть C: страница сокровищницы ---
+        self.loot_page = LootPage(self.wallet, self.chests, self.wheel, self.collection)
+        self.stack.addWidget(self.loot_page)       # 6
         self.stack.currentChanged.connect(self._on_stack_changed)
         self.projects_page.project_selected.connect(self._open_project)
         self.project_page.back_requested.connect(self._back_to_projects)
@@ -137,6 +159,15 @@ class MainWindow(QMainWindow):
         # Часть B: лимит похвалы для периодических подбадриваний монитора
         self.monitor.praise_gate = self.mood.praise_allowed
         self.monitor.praise_mark = self.mood.mark_praise
+        # --- Часть C: связывание экономики и лута ---
+        self.wallet.economy_changed.connect(self._update_wallet_ui)
+        self.wheel.spun.connect(self._on_wheel_result)
+        self.wagers.wager_won.connect(self._on_wager_won)
+        self.wagers.wager_lost.connect(self._on_wager_lost)
+        self.collection.set_completed.connect(
+            lambda: self.companion.say_aloud("excited", self.bank.say("set_complete")))
+        self._update_wallet_ui()
+        self._schedule_double_drop_hour()
 
     def _make_icon(self):
         pix = QPixmap(64, 64)
@@ -204,6 +235,9 @@ class MainWindow(QMainWindow):
         # Часть B: послушание греет Кая
         self.mood.on_obeyed()
         self._update_mood_ui()
+        # Часть C: монеты за послушание
+        if self._ludo_on():
+            self._hook_reward("obedience")
 
     # --- Часть B: выборы, долги, ритуал, сезоны ---
     def _on_choice_offered(self, choice_id, text, choices):
@@ -260,6 +294,108 @@ class MainWindow(QMainWindow):
             self.companion.say("neutral", self.bank.say("season_announce",
                                                         season=s["name"], emoji=s["emoji"]))
 
+    # --- Часть C: азарт-слой ---
+    def _ludo_on(self):
+        """Этический ограничитель №1: слой целиком отключаем галочкой."""
+        return (self.chests.enabled() and self.wheel.enabled()
+                and self.wagers.enabled())
+
+    def _coin_mult(self):
+        """Множитель монет: двойной дроп-час x2."""
+        return 2.0 if self._is_double_drop_hour() else 1.0
+
+    def _is_double_drop_hour(self):
+        return self.rituals.data.get("double_drop_hour") == datetime.now().hour
+
+    def _schedule_double_drop_hour(self):
+        """Один случайный час в день — двойной дроп-час, анонс голосом."""
+        import random as _r
+        rng = _r.Random(date.today().isoformat())
+        if self.rituals.data.get("double_drop_date") != date.today().isoformat():
+            self.rituals.data["double_drop_date"] = date.today().isoformat()
+            self.rituals.data["double_drop_hour"] = rng.randint(10, 22)
+            self.rituals.save()
+        self._ddh_announced = False
+        self._ddh_timer = QTimer(self)
+        self._ddh_timer.timeout.connect(self._check_double_drop_hour)
+        self._ddh_timer.start(60 * 1000)
+
+    def _check_double_drop_hour(self):
+        if self._is_double_drop_hour() and not getattr(self, "_ddh_announced", False):
+            self._ddh_announced = True
+            self.companion.say_aloud("excited", self.bank.say("double_drop_hour"))
+            self._toast("Кай", "⏰ Час двойного дропа! Монеты и шанс дропа x2")
+
+    def _hook_reward(self, source):
+        """Хук экономики: вызывать при task_done/rehearsal/focus/quest/obedience."""
+        self.wallet.earn(source, self._coin_mult())
+        if source == "focus_block":
+            self.wheel.add_charge("focus_block")
+        elif source == "daily_quest":
+            self.wheel.add_charge("daily_quest")
+
+    def _on_wheel_result(self, res):
+        loot = res["loot"]
+        t = loot.get("type")
+        if t == "coins":
+            self.wallet.data["wallet"]["coins"] += loot["amount"]
+            self.wallet.save()
+            self.companion.say("excited", self.bank.say("wheel_win", prize=res["label"]))
+        elif t == "token":
+            self.wallet.add_token(loot["token"])
+            self.companion.say("excited", self.bank.say("wheel_win", prize=res["label"]))
+        elif t == "grace":
+            self.debts.pardon(15)
+            self.companion.say("happy", self.bank.say("wheel_win", prize=res["label"]))
+        elif t == "chest":
+            opened = self.chests.open_chest(drop_chance=1.0)
+            if opened:
+                self._show_loot(opened[0], opened[1])
+        elif t == "empty":
+            if res["almost_jackpot"]:
+                self.companion.say("sarcastic", self.bank.say("wheel_nearmiss"))
+                self._show_loot(None, None, near_miss=True)
+            else:
+                self.companion.say("neutral", self.bank.say("wheel_empty"))
+        if self.stack.currentIndex() == 6:
+            self.loot_page.refresh()
+
+    def _show_loot(self, rarity, loot, near_miss=False):
+        toast = LootToast(rarity, loot, near_miss_label="🎯 Стрелка у самого джекпота! Почти!~" if near_miss else None)
+        screen = QApplication.primaryScreen().availableGeometry()
+        y = 60 + 90 * len(self.toasts)
+        toast.move(screen.right() - 360, y)
+        self.loot_toasts.append(toast)
+        toast.show()
+
+    def _apply_loot(self, loot):
+        """Начислить содержимое сундука."""
+        t = loot.get("type")
+        if t == "coins":
+            self.wallet.data["wallet"]["coins"] += loot["amount"]
+            self.wallet.save()
+        elif t == "token":
+            self.wallet.add_token(loot["token"])
+        elif t == "grace":
+            self.debts.pardon(999)
+        elif t == "card":
+            self.collection.add_card(loot["card_id"])
+        # xp_mult/cosmetic хранятся в инвентаре как ожидающие применения
+
+    def _update_wallet_ui(self):
+        self.status_bar_widget.mood_label.setToolTip(
+            f"Монеты: {self.wallet.coins()}")
+        if self.stack.currentIndex() == 6:
+            self.loot_page.refresh()
+
+    def _on_wager_won(self, wid, payout):
+        self.companion.say_aloud("excited", self.bank.say("wager_win"))
+        self._update_xp_ui()
+
+    def _on_wager_lost(self, wid, amount):
+        self.companion.say("sarcastic", self.bank.say("wager_lose"))
+        self._update_xp_ui()
+
     def _on_context(self, cat, title):
         t = title[:60]
         if cat == "off":
@@ -292,12 +428,18 @@ class MainWindow(QMainWindow):
         self._toast("Кай", f"Фокус-блок {minutes} минут! +20 XP")
         if self.monitor.push_enabled:
             push_notify("Кай", f"{minutes} минут непрерывной работы! +20 XP")
+        # Часть C: монеты за фокус + заряд колеса + гашение долга
+        if self._ludo_on():
+            self._hook_reward("focus_block")
+            self.debts.repay(25)
 
     def _on_tab(self, name):
         if name == "tasks":
             self.stack.setCurrentIndex(0)
         elif name == "game":
             self.stack.setCurrentIndex(4)
+        elif name == "loot":
+            self.stack.setCurrentIndex(6)
         else:
             self.stack.setCurrentIndex(5)
         self.nav.set_active(name)
@@ -309,6 +451,9 @@ class MainWindow(QMainWindow):
         elif idx == 5:
             self.settings_page.sync()
             self.nav.set_active("settings")
+        elif idx == 6:
+            self.loot_page.refresh()
+            self.nav.set_active("loot")
         else:
             self.nav.set_active("tasks")
 
@@ -350,7 +495,8 @@ class MainWindow(QMainWindow):
             self.companion.say_aloud("excited", self.bank.say("achievement", name=name))
 
     def _award(self, amount):
-        amount = int(amount * self.gamification.xp_multiplier())
+        # Часть C: перманентный бонус коллекции
+        amount = int(amount * self.gamification.xp_multiplier() * self.collection.bonus_multiplier())
         gained, leveled, level = self.gamification.add_xp(amount)
         self._update_xp_ui()
         if leveled:
@@ -385,6 +531,8 @@ class MainWindow(QMainWindow):
         self._unlock("first_project")
         self._hit_enemy(30, "проект")
         self._quest_progress("create1")
+        if self._ludo_on():
+            self._hook_reward("create1")
 
     def _on_task_created(self, name):
         self._award(15)
@@ -401,10 +549,32 @@ class MainWindow(QMainWindow):
         self._unlock("first_rehearsal")
         self._hit_enemy(50, "репетиция")
         self._quest_progress("reh1")
+        # Часть C: монеты + шанс сундука + карта коллекции
+        if self._ludo_on():
+            self._hook_reward("rehearsal_done")
+            opened = self.chests.open_chest(drop_chance=0.3)
+            if opened:
+                self._apply_loot(opened[1])
+                self._show_loot(*opened)
+                self.companion.say("excited", self.bank.say(f"drop_{opened[0]}"))
 
     def _on_task_done_toggled(self, now_done, name):
         if now_done:
-            self._award(100)
+            # Часть C: крит-ролл и стрик-множитель (только при включённом слое)
+            if self._ludo_on():
+                mult, kind = self.gamification.roll_crit()
+                mult *= self.gamification.streak_multiplier()
+                if kind == "supercrit":
+                    self.companion.say_aloud("excited", self.bank.say("supercrit"))
+                elif kind == "crit":
+                    self.companion.say_aloud("excited", self.bank.say("crit"))
+            else:
+                mult = 1.0
+            self._award(int(100 * mult))
+            # Часть C: расчёт активных ставок по этой задаче
+            for w in self.wagers.active():
+                if w["task"] == name:
+                    self.wagers.settle(w["id"], True)
             self.gamification.data["tasks_done"] = self.gamification.data.get("tasks_done", 0) + 1
             self.gamification._save()
             self.companion.on_task_done(name)
@@ -419,6 +589,14 @@ class MainWindow(QMainWindow):
                 self._unlock("all_done")
             self._hit_enemy(100, "задача")
             self._quest_progress("tasks2")
+            # Часть C: монеты + шанс сундука
+            if self._ludo_on():
+                self._hook_reward("task_done")
+                opened = self.chests.open_chest(drop_chance=0.5)
+                if opened:
+                    self._apply_loot(opened[1])
+                    self._show_loot(*opened)
+                    self.companion.say("excited", self.bank.say(f"drop_{opened[0]}"))
         else:
             self.companion.on_task_undone()
 

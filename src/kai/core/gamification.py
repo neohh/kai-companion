@@ -2,12 +2,21 @@
 core.gamification — XP, уровни, достижения, бои и ежедневные ивенты.
 Владельцы: Gamification, BattleManager, DailyQuests.
 Зависимости: json, pathlib, datetime; kai.constants (EQUIPMENT, ENEMIES, QUEST_DEFS).
+Часть C: крит-ролл при выполнении задачи (10% x2, 1% x5), стрик-множитель
+(x1.0 → x1.5 к 7 дню), стрик-фриз защищает стрик. Все множители — только
+к наградам за реальную работу.
 """
 import json
+import random
 from pathlib import Path
 from datetime import date, timedelta
 
 from kai.constants import EQUIPMENT, ENEMIES, QUEST_DEFS
+
+CRIT_CHANCE = 0.10
+SUPERCRIT_CHANCE = 0.01
+STREAK_BONUS_MAX = 1.5
+STREAK_BONUS_DAYS = 7
 
 
 class Gamification:
@@ -72,6 +81,10 @@ class Gamification:
         yesterday = (date.today() - timedelta(days=1)).isoformat()
         if self.data.get("last_done_date") == yesterday:
             self.data["streak"] = self.data.get("streak", 0) + 1
+        elif self.data.get("streak_frozen_until") in (yesterday, today):
+            # Часть C: стрик-фриз — пропуск дня не ломает стрик (отдых/сон)
+            self.data["streak"] = self.data.get("streak", 0) + 1
+            self.data["streak_frozen_until"] = None
         else:
             self.data["streak"] = 1
         self.data["last_done_date"] = today
@@ -83,6 +96,38 @@ class Gamification:
 
     def xp_multiplier(self):
         return 1.0 + 0.05 * len(self.unlocked_equipment())
+
+    # --- Часть C: крит, стрик-множитель, стрик-фриз ---
+    def roll_crit(self, seed=None):
+        """(multiplier, kind): 1.0 normal | 2.0 crit | 5.0 supercrit."""
+        rng = random.Random(seed) if seed is not None else random.random()
+        roll = rng.random() if seed is not None else random.random()
+        if roll < SUPERCRIT_CHANCE:
+            return 5.0, "supercrit"
+        if roll < SUPERCRIT_CHANCE + CRIT_CHANCE:
+            return 2.0, "crit"
+        return 1.0, "normal"
+
+    def streak_multiplier(self):
+        """x1.0 → x1.5 к 7 дню подряд (линейно)."""
+        streak = self.data.get("streak", 0)
+        if streak <= 0:
+            return 1.0
+        frac = min(streak, STREAK_BONUS_DAYS) / STREAK_BONUS_DAYS
+        return 1.0 + (STREAK_BONUS_MAX - 1.0) * frac
+
+    def use_streak_freeze(self):
+        """Стрик-фриз: защита стрика при пропуске дня. Требует токен в wallet."""
+        w = self.data.get("wallet", {}).get("tokens", {})
+        if w.get("streak_freeze", 0) <= 0:
+            return False
+        w["streak_freeze"] -= 1
+        self.data["streak_frozen_until"] = date.today().isoformat()
+        self._save()
+        return True
+
+    def streak_frozen_today(self):
+        return self.data.get("streak_frozen_until") == date.today().isoformat()
 
 
 # ============================================

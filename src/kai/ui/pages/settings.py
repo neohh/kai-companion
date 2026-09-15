@@ -26,7 +26,8 @@ class SettingsPage(QWidget):
     avatar_changed = pyqtSignal()
     _gemini_test_done = pyqtSignal(object)
 
-    def __init__(self, monitor, voice, avatar, companion, bank, mood=None, rituals=None, seasons=None):
+    def __init__(self, monitor, voice, avatar, companion, bank, mood=None, rituals=None, seasons=None,
+                 chests=None, wheel=None, wagers=None):
         super().__init__()
         self.monitor = monitor
         self.voice = voice
@@ -36,6 +37,9 @@ class SettingsPage(QWidget):
         self.mood = mood
         self.rituals = rituals
         self.seasons = seasons
+        self.chests = chests
+        self.wheel = wheel
+        self.wagers = wagers
         self.previews = {}
         self._gemini_test_btn = None
         self._gemini_test_done.connect(self._on_gemini_test_done)
@@ -262,6 +266,35 @@ class SettingsPage(QWidget):
         btn_save_rel.clicked.connect(self._save_relationship)
         rf.addWidget(btn_save_rel)
         layout.addWidget(rel_frame)
+        # --- АЗАРТ (Часть C) ---
+        ludo_frame = QFrame()
+        lf = QVBoxLayout(ludo_frame)
+        lt = QLabel("🎰 Азарт-слой (награды только за работу)")
+        lt.setStyleSheet("font-size: 18px; font-weight: bold; background: transparent;")
+        lf.addWidget(lt)
+        self.chk_ludo = QCheckBox("Включить азарт-слой (сундуки, колесо, ставки)")
+        self.chk_ludo.setToolTip("Выключено = все награды плоские, без рандома")
+        lf.addWidget(self.chk_ludo)
+        self.chk_wheel = QCheckBox("Колесо фортуны")
+        lf.addWidget(self.chk_wheel)
+        self.chk_wagers = QCheckBox("Ставки XP на задачи")
+        lf.addWidget(self.chk_wagers)
+        lrow = QHBoxLayout()
+        lrow.addWidget(QLabel("Лимит спинов в день:"))
+        self.spin_wheel_limit = QSpinBox()
+        self.spin_wheel_limit.setRange(1, 50)
+        lrow.addWidget(self.spin_wheel_limit)
+        lrow.addStretch()
+        lf.addLayout(lrow)
+        self.lbl_odds = QLabel("")
+        self.lbl_odds.setStyleSheet("color: #888; font-size: 11px; background: transparent;")
+        self.lbl_odds.setWordWrap(True)
+        lf.addWidget(self.lbl_odds)
+        btn_save_ludo = QPushButton("💾 Сохранить азарт")
+        btn_save_ludo.setStyleSheet("background-color: #533483; font-weight: bold;")
+        btn_save_ludo.clicked.connect(self._save_ludo)
+        lf.addWidget(btn_save_ludo)
+        layout.addWidget(ludo_frame)
         # --- СПРАЙТЫ ---
         spr_frame = QFrame()
         sf = QVBoxLayout(spr_frame)
@@ -343,6 +376,29 @@ class SettingsPage(QWidget):
         s = self.seasons.current()
         rate = int(self.rituals.ignore_rate_7d() * 100)
         self.lbl_season.setText(f"Текущий сезон: {s['emoji']} {s['name']} · доля игнора за 7 дней: {rate}%")
+        if self.chests is not None:
+            self._sync_ludo()
+
+    def _sync_ludo(self):
+        """Часть C: открытые вероятности и pity (этический ограничитель №2)."""
+        self.chk_ludo.setChecked(self.chests.enabled() and self.wheel.enabled() and self.wagers.enabled())
+        self.chk_wheel.setChecked(self.wheel.enabled())
+        self.chk_wagers.setChecked(self.wagers.enabled())
+        self.spin_wheel_limit.setValue(self.wheel.data.get("wheel_daily_limit", 5))
+        p = self.chests.pity_info()
+        self.lbl_odds.setText(
+            "Вероятности сундуков: common 60% · rare 25% · epic 12% · legendary 3%  |  "
+            f"Pity: epic+ каждые {p['pity_epic']} (сейчас {p['since_epic']}), "
+            f"legendary каждые {p['pity_legendary']} (сейчас {p['since_legendary']})")
+
+    def _save_ludo(self):
+        on = self.chk_ludo.isChecked()
+        self.chests.set_enabled(on)
+        self.wheel.set_enabled(on and self.chk_wheel.isChecked())
+        self.wagers.set_enabled(on and self.chk_wagers.isChecked())
+        self.wheel.data["wheel_daily_limit"] = self.spin_wheel_limit.value()
+        self.wheel.save()
+        self.companion.say("happy", self.bank.say("settings_saved"))
 
     def _save_relationship(self):
         self.mood.data["mood_ignore_threshold"] = self.spin_ignore_threshold.value()

@@ -23,15 +23,18 @@ class NavBar(QWidget):
         layout.setSpacing(10)
         self.btn_tasks = QPushButton("📋 Задачи")
         self.btn_game = QPushButton("🎮 Игра")
+        self.btn_loot = QPushButton("🎰 Сокровищница")
         self.btn_settings = QPushButton("⚙ Настройки")
-        for b in (self.btn_tasks, self.btn_game, self.btn_settings):
+        for b in (self.btn_tasks, self.btn_game, self.btn_loot, self.btn_settings):
             b.setCheckable(True)
             b.setStyleSheet("font-size: 16px; font-weight: bold; padding: 10px 25px;")
         self.btn_tasks.clicked.connect(lambda: self.tab_changed.emit("tasks"))
         self.btn_game.clicked.connect(lambda: self.tab_changed.emit("game"))
+        self.btn_loot.clicked.connect(lambda: self.tab_changed.emit("loot"))
         self.btn_settings.clicked.connect(lambda: self.tab_changed.emit("settings"))
         layout.addWidget(self.btn_tasks)
         layout.addWidget(self.btn_game)
+        layout.addWidget(self.btn_loot)
         layout.addWidget(self.btn_settings)
         layout.addStretch()
         self.btn_min = QPushButton("⬇")
@@ -45,4 +48,5 @@ class NavBar(QWidget):
     def set_active(self, name):
         self.btn_tasks.setChecked(name == "tasks")
         self.btn_game.setChecked(name == "game")
+        self.btn_loot.setChecked(name == "loot")
         self.btn_settings.setChecked(name == "settings")
