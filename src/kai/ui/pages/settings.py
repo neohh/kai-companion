@@ -403,6 +403,18 @@ class SettingsPage(QWidget):
                 if "location is not supported" in err:
                     err = ("Gemini API недоступен из твоего региона (User location is not supported).\n"
                            "Впиши прокси в поле выше (например http://127.0.0.1:8080), нажми «💾 Применить голос» и попробуй снова.")
+                elif "RESOURCE_EXHAUSTED" in err or "429" in err:
+                    import re as _re
+                    if "PerDay" in err:
+                        err = ("Дневной лимит Gemini TTS исчерпан (бесплатный тариф).\n"
+                               "Квота обновляется около 10:00 по Москве. Либо подключи биллинг в Google AI Studio.")
+                    else:
+                        wait = ""
+                        m = _re.search(r"retry in ([\d.]+)s", err)
+                        if m:
+                            wait = f" (попробуй через ~{int(float(m.group(1))) + 2} сек)"
+                        err = ("Минутный лимит Gemini исчерпан: на бесплатном тарифе TTS — 10 запросов в минуту." + wait +
+                               "\nПодожди немного и нажми «✨ Тест Gemini» ещё раз.")
                 elif "API key not valid" in err or "API_KEY_INVALID" in err:
                     err = "Ключ Gemini отклонён (API key not valid). Проверь ключ в aistudio.google.com."
                 done = (err,)
