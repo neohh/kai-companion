@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kai"
+version = "1.0.0"
+description = "Кай — компаньон для продуктивности: задачи, репетиции, геймификация, голос"
+requires-python = ">=3.10"
+dependencies = [
+    "PyQt6",
+    "pyttsx3",
+    "edge-tts",
+    "pygame-ce",
+    "plyer",
+    "imageio-ffmpeg",
+    "google-genai",
+]
+
+[project.scripts]
+kai = "kai.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

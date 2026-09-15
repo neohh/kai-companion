@@ -1,0 +1,7 @@
+PyQt6
+pyttsx3
+edge-tts
+pygame-ce
+plyer
+imageio-ffmpeg
+google-genai
