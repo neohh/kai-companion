@@ -1,9 +1,13 @@
 """
 core.monitor — мониторинг активных окон: «дрессировка» и контекст.
-Владельцы: ActivityMonitor (сигналы alert, work_block, context, reward, obeyed).
+Владельцы: ActivityMonitor (сигналы alert, work_block, context, reward, obeyed,
+choice_offered, choice_result, debt_taken).
 Зависимости: json, time, random, pathlib; PyQt6 (QObject, QTimer, pyqtSignal);
 kai.constants (DEFAULT_DISTRACT, DEFAULT_WORK, DISTRACT_NAMES, BROWSER_KEYS, APP_NAMES);
 kai.sys_utils.get_foreground_title.
+Часть B: часть односторонних уведомлений стала уведомлениями-выборами.
+Лестница игнора (1 мягко → 2 твёрже → 3 тихий бойкот 60 мин → примирение)
+живёт в core.relationship.Mood; монитор только эмитит события.
 """
 import json
 import time
@@ -26,6 +30,10 @@ class ActivityMonitor(QObject):
     context = pyqtSignal(str, str)
     reward = pyqtSignal(int)
     obeyed = pyqtSignal()
+    # --- Часть B: уведомления-выборы ---
+    choice_offered = pyqtSignal(str, str, list)   # (choice_id, text, [(id, label), ...])
+    choice_result = pyqtSignal(str, str)          # (choice_id, вариант)
+    debt_taken = pyqtSignal(int)                  # минут долга
 
     def __init__(self, data_dir, bank):
         super().__init__()
@@ -51,6 +59,9 @@ class ActivityMonitor(QObject):
         self.cur_site = ""
         self.next_cheer = 0
         self._last_ctx = None
+        # Часть B: гейт лимита похвалы (внедряется из MainWindow: Mood)
+        self.praise_gate = None   # callable -> bool
+        self.praise_mark = None   # callable
         self.timer = QTimer()
         self.timer.timeout.connect(self._poll)
         self.timer.start(5000)
@@ -95,6 +106,26 @@ class ActivityMonitor(QObject):
         if not on:
             self.context.emit("off", "")
 
+    # --- Часть B: уведомления-выборы ---
+    def offer_choice(self, choice_id, text, choices):
+        """Предложить выбор; mono-алерт уходит обычным путём, выбор — через UI."""
+        self.choice_offered.emit(choice_id, text, choices)
+
+    def resolve_choice(self, choice_id, option):
+        """Ответ пользователя из ChoiceToast (или таймаут = ignore)."""
+        self.choice_result.emit(choice_id, option)
+        if option == "ignore":
+            return
+        # любой контактный ответ после отвлекалки — засчитать послушание
+        if choice_id == "distract_exit":
+            if option == "exit_now":
+                self.alert.emit("happy", self.bank.say("good_boy"))
+                self.reward.emit(15)
+                self.obeyed.emit()
+            elif option == "debt_5":
+                self.debt_taken.emit(5)
+                self.alert.emit("sarcastic", self.bank.say("debt_reminder", debt="долг: 5 мин"))
+
     def _detect_app(self, title):
         for key, name in APP_NAMES:
             if key in title:
@@ -135,7 +166,13 @@ class ActivityMonitor(QObject):
             if cat == "distract":
                 self.distract_start = now
                 self.cur_site = self._detect_distract(low) or "Сайт"
-                self.alert.emit("sarcastic", self.bank.say("distract_now", site=self.cur_site))
+                # Часть B: первое напоминание — уведомление-выбор
+                self.offer_choice(
+                    "distract_exit",
+                    self.bank.say("distract_now", site=self.cur_site),
+                    [("exit_now", "✅ Выйти сейчас"),
+                     ("debt_5", "⏳ +5 мин в долг"),
+                     ("ignore", "🙈 Игнорирую")])
                 self.last_react = now
                 self.remind_count = 1
                 return
@@ -172,7 +209,11 @@ class ActivityMonitor(QObject):
         elif cat == "work":
             self.work_seconds += 5
             if now >= self.next_cheer:
-                self.alert.emit("excited", self.bank.say("work_keep"))
+                # Часть B: периодическое подбадривание — «похвала вне событий», с лимитом частоты
+                if self.praise_gate is None or self.praise_gate():
+                    self.alert.emit("excited", self.bank.say("work_keep"))
+                    if self.praise_mark is not None:
+                        self.praise_mark()
                 self.next_cheer = now + self.cheer_every + random.randint(-30, 30)
             if self.work_seconds >= 25 * 60:
                 self.work_seconds = 0

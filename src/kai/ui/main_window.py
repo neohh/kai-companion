@@ -4,7 +4,9 @@ ui.main_window — главное окно: composition root, создание �
 Зависимости: PyQt6; core.* (DataManager, Gamification, BattleManager, DailyQuests,
 PhraseBank, AvatarManager, ActivityMonitor, Companion); voice.engine.VoiceEngine;
 ui.theme.STYLESHEET; ui.nav.NavBar; ui.status_bar.StatusBar; ui.widgets.Toast;
-ui.pages.*; kai.constants.ACHIEVEMENTS; kai.sys_utils.push_notify.
+ui.choice_toast.ChoiceToast; ui.pages.*; kai.constants.ACHIEVEMENTS;
+kai.sys_utils.push_notify; kai.core.relationship.Mood; kai.core.contracts.DebtBook;
+kai.core.rituals.EveningRitual; kai.voice.seasons.SeasonWheel.
 """
 import sys
 
@@ -21,11 +23,16 @@ from kai.core.phrases import PhraseBank
 from kai.core.avatar import AvatarManager
 from kai.core.monitor import ActivityMonitor
 from kai.core.companion import Companion
+from kai.core.relationship import Mood
+from kai.core.contracts import DebtBook
+from kai.core.rituals import EveningRitual
 from kai.voice.engine import VoiceEngine
+from kai.voice.seasons import SeasonWheel
 from kai.ui.theme import STYLESHEET
 from kai.ui.nav import NavBar
 from kai.ui.status_bar import StatusBar
 from kai.ui.widgets import Toast
+from kai.ui.choice_toast import ChoiceToast
 from kai.ui.pages.projects import ProjectsPage
 from kai.ui.pages.project import ProjectPage
 from kai.ui.pages.task import TaskPage
@@ -47,9 +54,17 @@ class MainWindow(QMainWindow):
         self.quests = DailyQuests(self.gamification)
         self.avatar = AvatarManager(self.data.data_dir)
         self.voice_engine = VoiceEngine(self.data.data_dir)
-        self.companion = Companion(self.voice_engine, self.bank)
         self.monitor = ActivityMonitor(self.data.data_dir, self.bank)
+        # --- Часть B: живой Кай ---
+        self.mood = Mood(self.gamification.save_file)
+        self.debts = DebtBook(self.gamification.save_file)
+        self.rituals = EveningRitual(self.gamification.save_file)
+        self.seasons = SeasonWheel()
+        self.companion = Companion(self.voice_engine, self.bank,
+                                   mood=self.mood, debts=self.debts)
+        self.mood.daily_decay()
         self.toasts = []
+        self.choice_toasts = []
         self._last_emotion = "neutral"
         self.setWindowTitle("Кай")
         self.setGeometry(150, 100, 950, 750)
@@ -73,7 +88,9 @@ class MainWindow(QMainWindow):
         self.rehearsal_page = RehearsalPage(self.companion)
         self.game_page = GamePage(self.gamification, self.battle, self.quests, self.companion)
         self.settings_page = SettingsPage(self.monitor, self.voice_engine,
-                                          self.avatar, self.companion, self.bank)
+                                          self.avatar, self.companion, self.bank,
+                                          mood=self.mood, rituals=self.rituals,
+                                          seasons=self.seasons)
         self.stack.addWidget(self.projects_page)   # 0
         self.stack.addWidget(self.project_page)    # 1
         self.stack.addWidget(self.task_page)       # 2
@@ -101,13 +118,25 @@ class MainWindow(QMainWindow):
         self.monitor.context.connect(self._on_context)
         self.monitor.reward.connect(self._award)
         self.monitor.obeyed.connect(self._on_obeyed)
+        # --- Часть B: связывание выборов и ритуала ---
+        self.monitor.choice_offered.connect(self._on_choice_offered)
+        self.monitor.debt_taken.connect(self._on_debt_taken)
         self.settings_page.avatar_changed.connect(
             lambda: self._show_message(self._last_emotion, self.companion_text.text()))
         self.companion.message.connect(self._show_message)
         self._create_tray()
         self._update_xp_ui()
+        self._update_mood_ui()
         QTimer.singleShot(500, self.companion.greet)
         self.projects_page.refresh()
+        # таймер ритуала/сезонов: проверка раз в минуту
+        self._ritual_timer = QTimer(self)
+        self._ritual_timer.timeout.connect(self._check_ritual)
+        self._ritual_timer.start(60 * 1000)
+        self._check_season()
+        # Часть B: лимит похвалы для периодических подбадриваний монитора
+        self.monitor.praise_gate = self.mood.praise_allowed
+        self.monitor.praise_mark = self.mood.mark_praise
 
     def _make_icon(self):
         pix = QPixmap(64, 64)
@@ -172,6 +201,64 @@ class MainWindow(QMainWindow):
     def _on_obeyed(self):
         if self.gamification.add_obey():
             self._unlock("obedient")
+        # Часть B: послушание греет Кая
+        self.mood.on_obeyed()
+        self._update_mood_ui()
+
+    # --- Часть B: выборы, долги, ритуал, сезоны ---
+    def _on_choice_offered(self, choice_id, text, choices):
+        toast = ChoiceToast("Кай", text, choices, choice_id=choice_id)
+        toast.answered.connect(self._on_choice_answered)
+        screen = QApplication.primaryScreen().availableGeometry()
+        y = 60 + 90 * (len(self.toasts) + len(self.choice_toasts))
+        toast.move(screen.right() - 340, y)
+        self.choice_toasts.append(toast)
+        toast.show()
+
+    def _on_choice_answered(self, toast, option):
+        if toast in self.choice_toasts:
+            self.choice_toasts.remove(toast)
+        if option == "ignore":
+            res = self.mood.on_ignored()
+            self.rituals.count_ignored()
+            if res["strikes"] == 1:
+                self.companion.say("worried", self.bank.say("cold_pack"))
+            elif res["strikes"] == 2:
+                self.companion.say("sarcastic", self.bank.say("praise_scarcity"))
+            elif res["boycott_started"]:
+                self.companion.say("cold", self.bank.say("boycott_start"))
+        else:
+            self.rituals.count_answered()
+            self.mood.on_answered()
+        self.monitor.resolve_choice(getattr(toast, "choice_id", "") or "distract_exit", option)
+        self._update_mood_ui()
+
+    def _on_debt_taken(self, minutes):
+        self.debts.take_debt(minutes)
+        self._toast("Кай", f"Долг +{minutes} мин. Всего: {self.debts.phrase()}")
+
+    def _update_mood_ui(self):
+        em = self.mood.status_emoji().get(self.mood.status(), "😏")
+        if self.mood.status() == "boycott":
+            self.status_bar_widget.mood_label.setText(f"silent {self.mood.minutes_to_end()}м")
+        else:
+            self.status_bar_widget.mood_label.setText(f"{em} {self.mood.closeness()}")
+
+    def _check_ritual(self):
+        if self.rituals.pending():
+            return  # ждём ответа, не спамим
+        if self.rituals.due_now():
+            self.rituals.start()
+            self.companion.say_aloud("caring", self.bank.say("evening_ritual"))
+        elif self.rituals.negotiation_due(0.5):
+            self.rituals.mark_negotiated()
+            self.companion.say_aloud("worried", self.bank.say("negotiation"))
+
+    def _check_season(self):
+        if self.seasons.changes_today():
+            s = self.seasons.current()
+            self.companion.say("neutral", self.bank.say("season_announce",
+                                                        season=s["name"], emoji=s["emoji"]))
 
     def _on_context(self, cat, title):
         t = title[:60]

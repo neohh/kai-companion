@@ -26,13 +26,16 @@ class SettingsPage(QWidget):
     avatar_changed = pyqtSignal()
     _gemini_test_done = pyqtSignal(object)
 
-    def __init__(self, monitor, voice, avatar, companion, bank):
+    def __init__(self, monitor, voice, avatar, companion, bank, mood=None, rituals=None, seasons=None):
         super().__init__()
         self.monitor = monitor
         self.voice = voice
         self.avatar = avatar
         self.companion = companion
         self.bank = bank
+        self.mood = mood
+        self.rituals = rituals
+        self.seasons = seasons
         self.previews = {}
         self._gemini_test_btn = None
         self._gemini_test_done.connect(self._on_gemini_test_done)
@@ -219,6 +222,46 @@ class SettingsPage(QWidget):
         pbtn.addWidget(btn_reset_phr)
         pf.addLayout(pbtn)
         layout.addWidget(phr_frame)
+        # --- ОТНОШЕНИЯ (Часть B) ---
+        rel_frame = QFrame()
+        rf = QVBoxLayout(rel_frame)
+        rt = QLabel("💜 Отношения")
+        rt.setStyleSheet("font-size: 18px; font-weight: bold; background: transparent;")
+        rf.addWidget(rt)
+        rrow1 = QHBoxLayout()
+        rrow1.addWidget(QLabel("Игноров до тихого бойкота:"))
+        self.spin_ignore_threshold = QSpinBox()
+        self.spin_ignore_threshold.setRange(1, 10)
+        rrow1.addWidget(self.spin_ignore_threshold)
+        rrow1.addStretch()
+        rf.addLayout(rrow1)
+        rrow2 = QHBoxLayout()
+        rrow2.addWidget(QLabel("Лимит похвалы (раз в N минут):"))
+        self.spin_praise_cooldown = QSpinBox()
+        self.spin_praise_cooldown.setRange(5, 240)
+        rrow2.addWidget(self.spin_praise_cooldown)
+        rrow2.addStretch()
+        rf.addLayout(rrow2)
+        rrow3 = QHBoxLayout()
+        rrow3.addWidget(QLabel("Время вечернего ритуала:"))
+        self.spin_ritual_hour = QSpinBox()
+        self.spin_ritual_hour.setRange(0, 23)
+        self.spin_ritual_min = QSpinBox()
+        self.spin_ritual_min.setRange(0, 59)
+        self.spin_ritual_min.setSingleStep(5)
+        rrow3.addWidget(self.spin_ritual_hour)
+        rrow3.addWidget(QLabel(":"))
+        rrow3.addWidget(self.spin_ritual_min)
+        rrow3.addStretch()
+        rf.addLayout(rrow3)
+        self.lbl_season = QLabel("")
+        self.lbl_season.setStyleSheet("color: #888; font-size: 11px; background: transparent;")
+        rf.addWidget(self.lbl_season)
+        btn_save_rel = QPushButton("💾 Сохранить отношения")
+        btn_save_rel.setStyleSheet("background-color: #533483; font-weight: bold;")
+        btn_save_rel.clicked.connect(self._save_relationship)
+        rf.addWidget(btn_save_rel)
+        layout.addWidget(rel_frame)
         # --- СПРАЙТЫ ---
         spr_frame = QFrame()
         sf = QVBoxLayout(spr_frame)
@@ -286,6 +329,27 @@ class SettingsPage(QWidget):
         self._load_style_event()
         self._load_phrase_event()
         self._refresh_previews()
+        self._sync_relationship()
+
+    def _sync_relationship(self):
+        """Часть B: заполнить секцию «Отношения» из Mood/rituals/seasons."""
+        mood = getattr(self, "mood", None)
+        if mood is None:
+            return
+        self.spin_ignore_threshold.setValue(mood.threshold())
+        self.spin_praise_cooldown.setValue(mood.praise_cooldown_sec() // 60)
+        self.spin_ritual_hour.setValue(self.rituals.data["ritual_hour"])
+        self.spin_ritual_min.setValue(self.rituals.data["ritual_minute"])
+        s = self.seasons.current()
+        rate = int(self.rituals.ignore_rate_7d() * 100)
+        self.lbl_season.setText(f"Текущий сезон: {s['emoji']} {s['name']} · доля игнора за 7 дней: {rate}%")
+
+    def _save_relationship(self):
+        self.mood.data["mood_ignore_threshold"] = self.spin_ignore_threshold.value()
+        self.mood.data["mood_praise_cooldown_min"] = self.spin_praise_cooldown.value()
+        self.mood.save()
+        self.rituals.set_time(self.spin_ritual_hour.value(), self.spin_ritual_min.value())
+        self.companion.say("happy", self.bank.say("settings_saved"))
 
     def _load_style_event(self):
         key = self.style_combo.currentData()

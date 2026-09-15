@@ -1,7 +1,8 @@
 """
-ui.status_bar — нижняя панель статуса (аватар, реплика, контекст, XP).
+ui.status_bar — нижняя панель статуса (аватар, реплика, контекст, XP, близость).
 Владельцы: StatusBar (выделен из монолитного метода _create_status_bar).
 Зависимости: PyQt6 (QWidget, QHBoxLayout, QLabel, QProgressBar).
+Часть B: индикатор близости и статуса настроения (Mood).
 """
 from PyQt6.QtWidgets import QWidget, QHBoxLayout, QLabel, QProgressBar
 from PyQt6.QtCore import Qt
@@ -40,3 +41,8 @@ class StatusBar(QWidget):
         self.xp_label = QLabel("✨ 0/100")
         self.xp_label.setStyleSheet("font-size: 12px; color: #888; background: transparent;")
         layout.addWidget(self.xp_label)
+        # Часть B: близость и настроение
+        self.mood_label = QLabel("💜 50")
+        self.mood_label.setToolTip("Близость Кая и статус настроения")
+        self.mood_label.setStyleSheet("font-size: 13px; background: transparent;")
+        layout.addWidget(self.mood_label)

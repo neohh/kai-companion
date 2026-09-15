@@ -2,6 +2,8 @@
 core.companion — Компаньон Кай: фразы + озвучка (фасад над bank и voice).
 Владельцы: Companion (сигнал message).
 Зависимости: time; PyQt6 (QObject, pyqtSignal).
+Часть B: теплота фраз по Mood (пак warm/neutral/cold), лимит похвалы,
+вплетание {debt} в речь. Mood опционален: None = поведение монолита.
 """
 import time
 
@@ -14,10 +16,12 @@ from PyQt6.QtCore import pyqtSignal, QObject
 class Companion(QObject):
     message = pyqtSignal(str, str)
 
-    def __init__(self, voice_engine, bank):
+    def __init__(self, voice_engine, bank, mood=None, debts=None):
         super().__init__()
         self.voice = voice_engine
         self.bank = bank
+        self.mood = mood
+        self.debts = debts
         self.rate_pct = 30
         self.pause_per_char = 0.02
 
@@ -26,17 +30,42 @@ class Companion(QObject):
         self.pause_per_char = value * 0.002
 
     def say(self, emotion, text):
+        # Часть B: долг вплетается в любую реплику, если есть
+        if self.debts is not None and self.debts.minutes() > 0 and "{debt}" not in text:
+            text = f"{text} ({self.debts.phrase()})"
         self.message.emit(emotion, text)
 
     def say_aloud(self, emotion, text):
+        if self.debts is not None and self.debts.minutes() > 0 and "{debt}" not in text:
+            text = f"{text} ({self.debts.phrase()})"
         self.message.emit(emotion, text)
         self.voice.speak(text, block=False, rate_pct=0, emotion=emotion)
+
+    # --- Часть B: тёплота и дефицит похвалы ---
+    def pack_say(self, emotion, key_warm, key_neutral, key_cold):
+        """Реплика из пака по текущему настроению."""
+        pack = self.mood.pack() if self.mood else "neutral"
+        key = {"warm": key_warm, "neutral": key_neutral, "cold": key_cold}[pack]
+        self.say(emotion, self.bank.say(key))
+
+    def praise(self, emotion, text):
+        """Похвала с лимитом частоты; вне лимита — фраза о дефиците похвалы."""
+        if self.mood is None or self.mood.praise_allowed():
+            if self.mood is not None:
+                self.mood.mark_praise()
+            self.say_aloud(emotion, text)
+        else:
+            self.say(emotion, self.bank.say("praise_scarcity"))
 
     def speak_with_pause(self, text, emotion="caring"):
         self.voice.speak(text, block=True, rate_pct=self.rate_pct, emotion=emotion)
         time.sleep(max(1.0, len(text) * self.pause_per_char))
 
     def greet(self):
+        # Часть B: во время тихого бойкота Кай не приветствует голосом
+        if self.mood is not None and self.mood.boycotting():
+            self.say("cold", self.bank.say("cold_pack"))
+            return
         self.say_aloud("neutral", self.bank.say("greet"))
 
     def on_project_created(self, name):

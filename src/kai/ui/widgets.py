@@ -40,7 +40,8 @@ class Toast(QWidget):
         fl.addWidget(d)
         layout.addWidget(frame)
         self.setFixedWidth(320)
-        QTimer.singleShot(5000, self.close)
+        self._timeout_ms = 5000
+        QTimer.singleShot(self._timeout_ms, self.close)
 
     def closeEvent(self, event):
         self.closed.emit(self)
