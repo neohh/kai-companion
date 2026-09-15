@@ -99,6 +99,7 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         main_layout.addWidget(self.stack)
         self.status_bar_widget = StatusBar()
+        self.status_bar_widget.desire_action.connect(self._on_desire_action)
         main_layout.addWidget(self.status_bar_widget)
         self.setCentralWidget(central)
         self.projects_page = ProjectsPage(self.data)
@@ -152,6 +153,8 @@ class MainWindow(QMainWindow):
         self._update_mood_ui()
         QTimer.singleShot(500, self.companion.greet)
         QTimer.singleShot(3500, self._nudge_rehearsal)
+        # восстановить ленту желаний, если приложение перезапущено после побуждения
+        QTimer.singleShot(4200, self._restore_desire)
         self.projects_page.refresh()
         # таймер ритуала/сезонов: проверка раз в минуту
         self._ritual_timer = QTimer(self)
@@ -257,7 +260,7 @@ class MainWindow(QMainWindow):
         return pid, t
 
     def _nudge_rehearsal(self):
-        """При входе: предложить пройти репетицию первой незавершённой задачи."""
+        """При входе: побуждение к репетиции/просмотру задач + пуш + карта желания."""
         import datetime
         today = datetime.date.today().isoformat()
         if self.gamification.data.get("nudge_date") == today:
@@ -265,30 +268,72 @@ class MainWindow(QMainWindow):
         if self.mood.boycotting():
             return  # бойкот: Кай молчит
         cand = self._pick_rehearsal_candidate()
-        if not cand:
-            return
-        pid, task = cand
         self.gamification.data["nudge_date"] = today
         self.gamification._save()
-        self._pending_nudge = (pid, task["id"])
-        text = self.bank.say("rehearsal_nudge", name=task["name"])
+        if cand:
+            pid, task = cand
+            self._pending_nudge = (pid, task["id"])
+            text = self.bank.say("rehearsal_nudge", name=task["name"])
+            actions = [("rehearsal_start", "🎭 Пройти сейчас"),
+                       ("view_tasks", "📂 Задачи"),
+                       ("desire_later", "🕒 Позже")]
+            cid = "rehearsal_nudge"
+        else:
+            # нет задач с шагами — зовём просто посмотреть задачи
+            self._pending_nudge = None
+            text = self.bank.say("nudge_view_tasks")
+            actions = [("view_tasks", "📂 Открыть задачи"),
+                       ("desire_later", "🕒 Позже")]
+            cid = "view_tasks_nudge"
+        self._show_desire(text, actions)
         self.companion.say_aloud("caring", text)
-        self.monitor.offer_choice("rehearsal_nudge", text,
+        if self.monitor.push_enabled:
+            push_notify("Кай", text)
+        self.monitor.offer_choice(cid, text,
                                   [("start", "🎭 Пройти сейчас"),
                                    ("later", "🕒 Позже"),
                                    ("ignore", "🙈 Игнорирую")])
+
+    def _restore_desire(self):
+        """Восстановить ленту желаний, если побуждение уже было сегодня,
+        но карта не закрыта пользователем (перезапуск приложения)."""
+        import datetime
+        today = datetime.date.today().isoformat()
+        if self.gamification.data.get("nudge_date") != today:
+            return
+        if self.status_bar_widget.desire_frame.isVisible():
+            return
+        if self.mood.boycotting():
+            return
+        cand = self._pick_rehearsal_candidate()
+        if cand:
+            _, task = cand
+            self._pending_nudge = (cand[0], task["id"])
+            self._show_desire(
+                self.bank.say("rehearsal_nudge", name=task["name"]),
+                [("rehearsal_start", "🎭 Пройти сейчас"),
+                 ("view_tasks", "📂 Задачи"),
+                 ("desire_later", "🕒 Позже")])
+        else:
+            self._show_desire(
+                self.bank.say("nudge_view_tasks"),
+                [("view_tasks", "📂 Открыть задачи"),
+                 ("desire_later", "🕒 Позже")])
 
     def _resolve_nudge_choice(self, option):
         cand = getattr(self, "_pending_nudge", None)
         self._pending_nudge = None
         if option == "start" and cand:
+            self.status_bar_widget.clear_desire()
             pid, tid = cand
             task = self.data.get_task(pid, tid)
             if task:
                 self._start_rehearsal(task["steps"], task["name"], "voice")
         elif option == "later":
+            self.status_bar_widget.clear_desire()
             self.companion.say("neutral", self.bank.say("nudge_later"))
         elif option == "ignore":
+            self.status_bar_widget.clear_desire()
             res = self.mood.on_ignored()
             self.rituals.count_ignored()
             self._update_mood_ui()
@@ -333,11 +378,32 @@ class MainWindow(QMainWindow):
         self._toast("Кай", f"Долг +{minutes} мин. Всего: {self.debts.phrase()}")
 
     def _update_mood_ui(self):
-        em = self.mood.status_emoji().get(self.mood.status(), "😏")
-        if self.mood.status() == "boycott":
-            self.status_bar_widget.mood_label.setText(f"silent {self.mood.minutes_to_end()}м")
-        else:
-            self.status_bar_widget.mood_label.setText(f"{em} {self.mood.closeness()}")
+        st = self.mood.status()
+        em = self.mood.status_emoji().get(st, "😏")
+        extra = ""
+        if st == "boycott":
+            extra = f"({self.mood.minutes_to_end()}м)"
+        self.status_bar_widget.set_mood(self.mood.closeness(), st, em, extra)
+
+    # --- лента желаний Кая (persistent-предложение в панели) ---
+    def _show_desire(self, text, actions):
+        self.status_bar_widget.set_desire(text, actions)
+
+    def _on_desire_action(self, action_id):
+        self.status_bar_widget.clear_desire()
+        if action_id == "rehearsal_start":
+            cand = getattr(self, "_pending_nudge", None)
+            self._pending_nudge = None
+            if cand:
+                pid, tid = cand
+                task = self.data.get_task(pid, tid)
+                if task:
+                    self._start_rehearsal(task["steps"], task["name"], "voice")
+        elif action_id == "view_tasks":
+            self._show_window()
+            self.stack.setCurrentIndex(0)
+        elif action_id == "desire_later":
+            self.companion.say("neutral", self.bank.say("nudge_later"))
 
     def _check_ritual(self):
         if self.rituals.pending():
@@ -444,8 +510,6 @@ class MainWindow(QMainWindow):
         # xp_mult/cosmetic хранятся в инвентаре как ожидающие применения
 
     def _update_wallet_ui(self):
-        self.status_bar_widget.mood_label.setToolTip(
-            f"Монеты: {self.wallet.coins()}")
         if self.stack.currentIndex() == 6:
             self.loot_page.refresh()
 
